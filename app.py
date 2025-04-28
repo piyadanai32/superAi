@@ -7,10 +7,14 @@ from dotenv import load_dotenv
 from linebot.v3 import WebhookHandler
 from linebot.v3.messaging import Configuration, ApiClient, MessagingApi
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
-from linebot.v3.messaging import TextMessage, ReplyMessageRequest
+from linebot.v3.messaging import (
+    TextMessage, FlexMessage, FlexContainer, ReplyMessageRequest,
+    QuickReply, QuickReplyItem, MessageAction
+)
 from linebot.v3.exceptions import InvalidSignatureError
 from google.cloud.dialogflow_v2 import SessionsClient
 from google.cloud.dialogflow_v2.types import TextInput, QueryInput
+from google.protobuf.json_format import MessageToDict
 
 # โหลด environment variables
 load_dotenv()
@@ -38,8 +42,6 @@ line_bot_api = MessagingApi(api_client)
 huggingface_qa_pipeline = None
 try:
     from transformers import pipeline
-    # เปลี่ยนเป็น model ที่รองรับ text-generation
-    # huggingface_qa_pipeline = pipeline("text-generation", model="gpt2")
     # หรือใช้ model ภาษาไทย ถ้าต้องการ
     huggingface_qa_pipeline = pipeline("text-generation", model="flax-community/gpt2-base-thai")
     logger.info("Hugging Face model loaded successfully")
@@ -52,7 +54,7 @@ INVALID_DIALOGFLOW_RESPONSES = [
     "ขอโทษค่ะ ไม่เข้าใจ",
     "พูดใหม่อีกครั้งได้ไหมคะ",
     "ขอโทษค่ะ ฉันไม่เข้าใจค่ะ",
-    "พูดอีกทีได้ไหมคะ"  # เพิ่มเข้ามาตามที่เห็นในข้อความ error
+    "พูดอีกทีได้ไหมคะ" 
 ]
 
 @app.route("/callback", methods=['POST'])
@@ -76,7 +78,7 @@ def handle_message(event):
     logger.info(f"Message from {user_id}: {text_from_user}")
 
     is_group = hasattr(event.source, 'type') and event.source.type in ['group', 'room']
-    bot_name = "น้องสวพ."
+    bot_name = "DPA Chatbot"
     should_respond = False
     actual_message = text_from_user
 
@@ -90,35 +92,186 @@ def handle_message(event):
     if should_respond:
         if not actual_message:
             reply_text = f"สวัสดีค่ะ หนูชื่อ {bot_name} คุณต้องการสอบถามอะไรค่ะ?"
+            send_text_message(event.reply_token, reply_text)
         else:
-            # Step 1: Dialogflow
-            user_session_id = f"{SESSION_ID}-{user_id}"
-            response = detect_intent_texts(DIALOGFLOW_PROJECT_ID, user_session_id, actual_message, 'th')
-            fulfillment_text = response.query_result.fulfillment_text.strip()
-            logger.info(f"Dialogflow response: {fulfillment_text}")
+            try:
+                # Step 1: Dialogflow
+                user_session_id = f"{SESSION_ID}-{user_id}"
+                response = detect_intent_texts(DIALOGFLOW_PROJECT_ID, user_session_id, actual_message, 'th')
+                
+                # แปลง response เป็น dict สำหรับตรวจสอบ
+                response_dict = MessageToDict(response._pb)
+                logger.info(f"Dialogflow response: {json.dumps(response_dict, indent=2, ensure_ascii=False)[:1000]}")
+                
+                # เตรียมข้อมูลที่จะส่งกลับ
+                messages_to_reply = []
+                quick_replies = []
+                has_payload = False
+                
+                # ตรวจสอบและรวบรวมทุกข้อความจาก Dialogflow
+                if 'queryResult' in response_dict:
+                    # ตรวจสอบหา messages ที่มี quick replies และ payloads
+                    if 'fulfillmentMessages' in response_dict['queryResult']:
+                        for message in response_dict['queryResult']['fulfillmentMessages']:
+                            # ตรวจสอบข้อความปกติ
+                            if 'text' in message and 'text' in message['text'] and message['text']['text']:
+                                for text in message['text']['text']:
+                                    if text and text not in INVALID_DIALOGFLOW_RESPONSES:
+                                        text_message = TextMessage(text=text)
+                                        messages_to_reply.append(text_message)
+                            
+                            # Check Quick Replies
+                            if 'quickReplies' in message:
+                                quick_reply_items = []
+                                if 'quickReplies' in message['quickReplies'] and isinstance(message['quickReplies']['quickReplies'], list):
+                                    for qr in message['quickReplies']['quickReplies']:
+                                        quick_reply_items.append(
+                                            QuickReplyItem(
+                                                action=MessageAction(
+                                                    label=qr[:20],  # LINE limits labels to 20 characters
+                                                    text=qr
+                                                )
+                                            )
+                                        )
+                                if quick_reply_items:
+                                    quick_replies = QuickReply(items=quick_reply_items)
+                                    # ใส่ quick replies ในข้อความสุดท้าย (ถ้ามี)
+                                    if messages_to_reply:
+                                        messages_to_reply[-1].quick_reply = quick_replies
+                                    
+                            # Check Custom Payload
+                            if 'payload' in message:
+                                has_payload = True
+                                process_payload(message['payload'], messages_to_reply)
+                
+                # ถ้าไม่มีข้อความใน fulfillmentMessages ให้ใช้ fulfillmentText (ถ้ามี)
+                if not messages_to_reply and 'fulfillmentText' in response_dict['queryResult']:
+                    text_response = response_dict['queryResult']['fulfillmentText']
+                    if text_response and text_response not in INVALID_DIALOGFLOW_RESPONSES:
+                        text_message = TextMessage(text=text_response, quick_reply=quick_replies if quick_replies else None)
+                        messages_to_reply.append(text_message)
+                
+                # หากมีอย่างน้อยหนึ่งข้อความให้ส่งทั้งหมด
+                if messages_to_reply:
+                    # เพิ่ม quick replies ให้กับข้อความสุดท้าย (ถ้ามี quick replies แต่ยังไม่ได้ใส่)
+                    if quick_replies and not messages_to_reply[-1].quick_reply:
+                        messages_to_reply[-1].quick_reply = quick_replies
+                    
+                    send_multiple_messages(event.reply_token, messages_to_reply)
+                else:
+                    # ไม่มีข้อความจาก Dialogflow ใช้การค้นหาเอกสาร
+                    logger.info("No valid response from Dialogflow, trying document search")
+                    reply_text = search_from_documents(actual_message)
 
-            if fulfillment_text and fulfillment_text not in INVALID_DIALOGFLOW_RESPONSES:
-                reply_text = fulfillment_text
-            else:
-                # Step 2: Document search
-                logger.info("No valid response from Dialogflow, trying document search")
-                reply_text = search_from_documents(actual_message)
+                    if not reply_text:
+                        # ไม่พบในเอกสาร ใช้ Hugging Face
+                        logger.info("No response from documents, trying Hugging Face model")
+                        reply_text = ask_huggingface_model(actual_message)
+                    
+                    # ส่งข้อความที่ได้
+                    text_message = TextMessage(text=reply_text, quick_reply=quick_replies if quick_replies else None)
+                    send_multiple_messages(event.reply_token, [text_message])
+                
+            except Exception as e:
+                logger.error(f"Error processing message: {str(e)}")
+                send_text_message(event.reply_token, "ขออภัย เกิดข้อผิดพลาดในการประมวลผล กรุณาลองใหม่อีกครั้ง")
 
-                if not reply_text:
-                    # Step 3: Hugging Face fallback
-                    logger.info("No response from documents, trying Hugging Face model")
-                    reply_text = ask_huggingface_model(actual_message)
+# ฟังก์ชันใหม่เพื่อประมวลผล payload และเพิ่มเข้าไปในรายการข้อความ
+def process_payload(payload, messages_list):
+    try:
+        logger.info(f"Processing payload: {json.dumps(payload, indent=2, ensure_ascii=False)[:500]}")
+        
+        # ตรวจสอบว่ามี LINE Flex Message หรือไม่
+        if 'line' in payload and isinstance(payload['line'], dict):
+            line_content = payload['line']
+            
+            if 'type' in line_content and line_content['type'] == 'flex':
+                # สร้าง Flex Message
+                flex_message = create_flex_message(line_content)
+                if flex_message:
+                    messages_list.append(flex_message)
+                return
+        
+        # ตรวจสอบกรณีที่ payload เป็น Flex Message โดยตรง
+        if isinstance(payload, dict) and 'type' in payload and payload['type'] == 'flex':
+            # สร้าง Flex Message
+            flex_message = create_flex_message(payload)
+            if flex_message:
+                messages_list.append(flex_message)
+            return
+            
+    except Exception as e:
+        logger.error(f"Error processing payload: {str(e)}")
 
-        # ส่งข้อความกลับไป (แก้ไขการใช้ reply_message)
-        try:
-            logger.info(f"Sending reply: {reply_text}")
-            reply_request = ReplyMessageRequest(
-                reply_token=event.reply_token,
-                messages=[TextMessage(text=reply_text)]
+# สร้าง Flex Message จาก payload
+def create_flex_message(flex_content):
+    try:
+        # Debug
+        logger.info(f"Creating Flex Message: {json.dumps(flex_content)[:200]}...")
+        
+        # ตรวจสอบและแก้ไขโครงสร้าง JSON ที่อาจมีปัญหา
+        if 'contents' in flex_content:
+            # แก้ไขปัญหาที่อาจมีในโครงสร้าง JSON
+            flex_contents = flex_content['contents']
+            # ทำความสะอาดข้อมูล JSON (ถ้าจำเป็น)
+            if isinstance(flex_contents, dict):
+                # ตรวจสอบความถูกต้องของ JSON
+                json.dumps(flex_contents)  # ทดสอบว่าสามารถแปลงเป็น JSON ได้
+
+            # สร้าง FlexContainer object (จำเป็นสำหรับ LINE API v3)
+            flex_container = FlexContainer.from_dict(flex_content['contents'])
+            
+            # สร้างและส่งคืน FlexMessage object
+            return FlexMessage(
+                alt_text=flex_content.get('altText', 'Flex Message'),
+                contents=flex_container
             )
-            line_bot_api.reply_message_with_http_info(reply_request)
-        except Exception as e:
-            logger.error(f"Error sending reply: {str(e)}")
+        
+        return None
+    except Exception as e:
+        logger.error(f"Error creating Flex Message: {str(e)}")
+        return None
+
+# ฟังก์ชั่นส่งหลายข้อความในครั้งเดียว
+def send_multiple_messages(reply_token, messages):
+    try:
+        if not messages:
+            logger.warning("No messages to send")
+            return
+            
+        logger.info(f"Sending {len(messages)} messages")
+        reply_request = ReplyMessageRequest(
+            reply_token=reply_token,
+            messages=messages
+        )
+        line_bot_api.reply_message_with_http_info(reply_request)
+        logger.info("Messages sent successfully")
+    except Exception as e:
+        logger.error(f"Error sending multiple messages: {str(e)}")
+        # Fallback to simple text message
+        try:
+            send_text_message(reply_token, "ขออภัย เกิดข้อผิดพลาดในการส่งข้อความ")
+        except:
+            logger.error("Failed to send fallback message")
+
+# ฟังก์ชั่นส่งข้อความตัวอักษร (แยกออกมาเพื่อความสะดวก)
+def send_text_message(reply_token, text):
+    try:
+        # ตรวจสอบว่าข้อความไม่เป็นค่าว่าง
+        text = text if text else "ขออภัย ไม่พบข้อมูล"
+        
+        # ตัดความยาวข้อความถ้าเกิน limit
+        if len(text) > 2000:
+            text = text[:1997] + "..."
+            
+        logger.info(f"Sending text reply: {text[:100]}...")
+        reply_request = ReplyMessageRequest(
+            reply_token=reply_token,
+            messages=[TextMessage(text=text)]
+        )
+        line_bot_api.reply_message_with_http_info(reply_request)
+    except Exception as e:
+        logger.error(f"Error sending text message: {str(e)}")
 
 # -------------------- Dialogflow --------------------
 def detect_intent_texts(project_id, session_id, text, language_code):
@@ -135,7 +288,9 @@ def detect_intent_texts(project_id, session_id, text, language_code):
         class MockResponse:
             class MockQueryResult:
                 fulfillment_text = ""
+                fulfillment_messages = []
             query_result = MockQueryResult()
+            _pb = None
         return MockResponse()
 
 # -------------------- Document Search --------------------
@@ -169,6 +324,9 @@ def ask_huggingface_model(question):
         
         logger.info(f"Asking Hugging Face model: {question}")
         result = huggingface_qa_pipeline(question, max_new_tokens=100)[0]['generated_text']
+        # ตัดข้อความให้สั้นลงเพื่อหลีกเลี่ยงปัญหาความยาวเกินขีดจำกัด
+        if len(result) > 2000:
+            result = result[:1997] + "..."
         return result
     except Exception as e:
         logger.error(f"Hugging Face error: {str(e)}")
