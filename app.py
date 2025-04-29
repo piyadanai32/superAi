@@ -403,7 +403,6 @@ def get_data_files(directory='data'):
         'docx': [],
         'json': [],
         'txt': [],
-        'other': []
     }
     
     # หาไดเรกทอรีหลักของโปรเจค
@@ -427,8 +426,6 @@ def get_data_files(directory='data'):
                 data_files['json'].append(file_path)
             elif ext.lower() == '.txt':
                 data_files['txt'].append(file_path)
-            else:
-                data_files['other'].append(file_path)
     
     return data_files
 
@@ -629,6 +626,8 @@ def search_from_documents(question):
     except Exception as e:
         logger.error(f"เกิดข้อผิดพลาดในการค้นหาเอกสาร: {str(e)}")
         return "ขออภัย เกิดข้อผิดพลาดในการค้นหาข้อมูล กรุณาลองใหม่อีกครั้ง"
+
+
 
 def ask_huggingface_model(question):
     """
