@@ -16,15 +16,11 @@ from linebot.v3.exceptions import InvalidSignatureError
 from google.cloud.dialogflow_v2 import SessionsClient
 from google.cloud.dialogflow_v2.types import TextInput, QueryInput
 from google.protobuf.json_format import MessageToDict
+import docx  
+from difflib import SequenceMatcher 
 
-# ไลบรารีเพิ่มเติมสำหรับอ่านไฟล์
-import docx  # สำหรับอ่านไฟล์ .docx
-from difflib import SequenceMatcher  # สำหรับเปรียบเทียบความคล้ายของข้อความ
-
-# โหลด environment variables จากไฟล์ .env
 load_dotenv()
 
-# ตรวจสอบและกำหนดค่าตัวแปรสภาพแวดล้อมที่จำเป็น
 GOOGLE_APPLICATION_CREDENTIALS = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
 if not GOOGLE_APPLICATION_CREDENTIALS:
     raise ValueError("ไม่พบตัวแปรสภาพแวดล้อม GOOGLE_APPLICATION_CREDENTIALS")
