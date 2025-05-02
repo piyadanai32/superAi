@@ -16,11 +16,15 @@ from linebot.v3.exceptions import InvalidSignatureError
 from google.cloud.dialogflow_v2 import SessionsClient
 from google.cloud.dialogflow_v2.types import TextInput, QueryInput
 from google.protobuf.json_format import MessageToDict
-import docx  
-from difflib import SequenceMatcher 
 
+# ไลบรารีเพิ่มเติมสำหรับอ่านไฟล์
+import docx  # สำหรับอ่านไฟล์ .docx
+from difflib import SequenceMatcher  # สำหรับเปรียบเทียบความคล้ายของข้อความ
+
+# โหลด environment variables จากไฟล์ .env
 load_dotenv()
 
+# ตรวจสอบและกำหนดค่าตัวแปรสภาพแวดล้อมที่จำเป็น
 GOOGLE_APPLICATION_CREDENTIALS = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
 if not GOOGLE_APPLICATION_CREDENTIALS:
     raise ValueError("ไม่พบตัวแปรสภาพแวดล้อม GOOGLE_APPLICATION_CREDENTIALS")
@@ -120,6 +124,7 @@ def handle_message(event):
         else:
             try:
                 # ขั้นตอนที่ 1: ส่งคำถามไปยัง Dialogflow
+                logger.info("เริ่มขั้นตอนที่ 1: ส่งคำถามไปยัง Dialogflow")
                 user_session_id = f"{SESSION_ID}-{user_id}"
                 response = detect_intent_texts(DIALOGFLOW_PROJECT_ID, user_session_id, actual_message, 'th')
                 
@@ -177,20 +182,22 @@ def handle_message(event):
                 
                 # หากมีอย่างน้อยหนึ่งข้อความให้ส่งทั้งหมด
                 if messages_to_reply:
+                    logger.info("พบคำตอบจาก Dialogflow ส่งคำตอบให้ผู้ใช้")
                     # เพิ่ม quick replies ให้กับข้อความสุดท้าย (ถ้ามี quick replies แต่ยังไม่ได้ใส่)
                     if quick_replies and not messages_to_reply[-1].quick_reply:
                         messages_to_reply[-1].quick_reply = quick_replies
                     
                     send_multiple_messages(event.reply_token, messages_to_reply)
                 else:
-                    # ไม่มีข้อความจาก Dialogflow หรือได้รับคำตอบที่ไม่ต้องการ ใช้การค้นหาเอกสาร
-                    logger.info("ไม่พบคำตอบที่ถูกต้องจาก Dialogflow กำลังค้นหาในเอกสาร")
-                    reply_text = search_from_documents(actual_message)
+                    # ขั้นตอนที่ 2: ค้นหาในเอกสาร
+                    logger.info("เริ่มขั้นตอนที่ 2: ค้นหาในเอกสาร")
+                    reply_text, found_in_docs = search_from_documents(actual_message)
 
-                    if not reply_text:
-                        # ไม่พบในเอกสาร ใช้ Hugging Face
-                        logger.info("ไม่พบคำตอบในเอกสาร กำลังใช้โมเดล Hugging Face")
+                    if not found_in_docs:
+                        # ขั้นตอนที่ 3: ใช้ Hugging Face
+                        logger.info("เริ่มขั้นตอนที่ 3: ใช้ Hugging Face")
                         reply_text = ask_huggingface_model(actual_message)
+                        logger.info("ได้คำตอบจาก Hugging Face")
                     
                     # ส่งข้อความที่ได้
                     text_message = TextMessage(text=reply_text, quick_reply=quick_replies if quick_replies else None)
@@ -432,198 +439,99 @@ def search_from_documents(question):
     try:
         # หาไฟล์ข้อมูลทั้งหมด
         all_files = get_data_files('data')
+        logger.info(f"เริ่มค้นหาคำถาม: '{question}' ในเอกสาร")
         logger.info(f"พบไฟล์เอกสารทั้งหมด: docx={len(all_files['docx'])}, json={len(all_files['json'])}, txt={len(all_files['txt'])}")
         
         best_match = None
         best_match_score = 0
         best_match_answer = ""
+        found_answer = False
         
-        # 1. ค้นหาในไฟล์ JSON ก่อน (สำหรับข้อมูลที่มีโครงสร้าง)
+        # ค้นหาในไฟล์ JSON
         for json_file in all_files['json']:
             try:
                 data = extract_data_from_json(json_file)
                 
-                # ตรวจสอบว่าเป็น JSON ที่มีโครงสร้างข้อมูลคำถาม-คำตอบหรือไม่
                 if isinstance(data, list):
                     for item in data:
                         if isinstance(item, dict) and "question" in item and "answer" in item:
-                            # ค้นหาคำถามที่ตรงกันหรือคล้ายกัน
                             similarity = similar(question, item["question"])
-                            if similarity > best_match_score and similarity > 0.7:  # ความเหมือนมากกว่า 70%
+                            if similarity > best_match_score and similarity > 0.7:
+                                found_answer = True
                                 best_match = item["question"]
                                 best_match_score = similarity
                                 best_match_answer = item["answer"]
-                                logger.info(f"พบคำตอบที่คล้ายกัน ({similarity:.2f}) จาก {json_file}: {item['question']}")
-                                
-                            # ค้นหาแบบบางส่วน (substring)
-                            elif question.lower() in item["question"].lower() and similarity > 0.4:
-                                if similarity > best_match_score:
-                                    best_match = item["question"]
-                                    best_match_score = similarity
-                                    best_match_answer = item["answer"]
-                                    logger.info(f"พบคำตอบที่เป็นส่วนหนึ่ง ({similarity:.2f}) จาก {json_file}: {item['question']}")
-                
-                # ตรวจสอบกรณีที่ JSON มีรูปแบบอื่น
-                elif isinstance(data, dict):
-                    # ตรวจสอบกรณีที่เป็น dictionary โดยตรง (เช่น {คำถาม1: คำตอบ1, คำถาม2: คำตอบ2})
-                    for key, value in data.items():
-                        similarity = similar(question, key)
-                        if similarity > best_match_score and similarity > 0.6:
-                            best_match = key
-                            best_match_score = similarity
-                            best_match_answer = str(value)
-                            logger.info(f"พบคำตอบจาก dict ({similarity:.2f}) จาก {json_file}: {key}")
+                                logger.info(f"พบคำตอบที่คล้ายกัน ({similarity:.2f}) จากไฟล์ JSON: {json_file}")
+                                logger.info(f"คำถามที่คล้าย: {item['question']}")
+                                logger.info(f"ค่าความคล้าย: {similarity:.2f}")
             except Exception as e:
                 logger.error(f"เกิดข้อผิดพลาดในการประมวลผลไฟล์ JSON {json_file}: {str(e)}")
                 continue
 
-        # 2. ถ้ายังไม่พบคำตอบในรูปแบบ JSON ให้ค้นหาในไฟล์ DOCX
-        if best_match_score < 0.8:  # ถ้ายังไม่พบคำตอบที่ดีพอ
+        # ค้นหาในไฟล์ DOCX
+        if best_match_score < 0.8:
             for docx_file in all_files['docx']:
                 try:
                     content = extract_text_from_docx(docx_file)
                     if not content:
                         continue
                     
-                    # แบ่งเนื้อหาเป็นย่อหน้า
                     paragraphs = content.split('\n')
                     for i, para in enumerate(paragraphs):
                         if not para.strip():
                             continue
                             
-                        # ค้นหาส่วนที่คล้ายคำถาม
                         similarity = similar(question, para)
-                        
-                        # ถ้าพบส่วนที่คล้ายคำถาม ให้ใช้ย่อหน้าถัดไปเป็นคำตอบ
                         if similarity > best_match_score and similarity > 0.6:
+                            found_answer = True
                             best_match = para
                             best_match_score = similarity
-                            
-                            # ดึงย่อหน้าถัดไป (ถ้ามี) เป็นคำตอบ
-                            if i+1 < len(paragraphs) and paragraphs[i+1].strip():
-                                best_match_answer = paragraphs[i+1]
-                            else:
-                                # ถ้าไม่มีย่อหน้าถัดไป ใช้ย่อหน้าปัจจุบัน
-                                best_match_answer = para
-                            
-                            logger.info(f"พบคำตอบจาก DOCX ({similarity:.2f}) จาก {docx_file}")
-                            
-                        # ค้นหาแบบคำสำคัญ
-                        elif question.lower() in para.lower() and len(para.strip()) > 20:
-                            similarity_keyword = 0.5 + (0.3 * (len(question) / len(para)))  # ปรับค่าความคล้ายตามความยาว
-                            if similarity_keyword > best_match_score:
-                                best_match = question
-                                best_match_score = similarity_keyword
-                                # ใช้ย่อหน้าที่พบ + ย่อหน้าถัดไป (ถ้ามี)
-                                best_match_answer = para
-                                if i+1 < len(paragraphs) and paragraphs[i+1].strip():
-                                    best_match_answer += "\n\n" + paragraphs[i+1]
-                                
-                                logger.info(f"พบคำสำคัญใน DOCX ({similarity_keyword:.2f}) จาก {docx_file}")
+                            best_match_answer = paragraphs[i+1] if i+1 < len(paragraphs) else para
+                            logger.info(f"พบคำตอบจากไฟล์ DOCX ({similarity:.2f}): {docx_file}")
+                            logger.info(f"ย่อหน้าที่คล้าย: {para[:100]}...")
+                            logger.info(f"ค่าความคล้าย: {similarity:.2f}")
                 except Exception as e:
                     logger.error(f"เกิดข้อผิดพลาดในการประมวลผลไฟล์ DOCX {docx_file}: {str(e)}")
                     continue
 
-        # 3. ถ้ายังไม่พบคำตอบที่ดีพอจาก JSON และ DOCX ให้ค้นหาในไฟล์ TXT
-        if best_match_score < 0.8:  # ถ้ายังไม่พบคำตอบที่ดีพอ
+        # ค้นหาในไฟล์ TXT
+        if best_match_score < 0.8:
             for txt_file in all_files['txt']:
                 try:
                     content = extract_text_from_txt(txt_file)
                     if not content:
                         continue
                     
-                    # แบ่งเนื้อหาเป็นย่อหน้า
                     paragraphs = content.split('\n')
-                    
-                    # แบ่งเนื้อหาเป็นส่วน ๆ ตามลำดับความสำคัญ
-                    sections = []
-                    current_section = []
-                    
-                    for para in paragraphs:
+                    for i, para in enumerate(paragraphs):
                         if not para.strip():
-                            if current_section:
-                                sections.append('\n'.join(current_section))
-                                current_section = []
-                            continue
-                        current_section.append(para)
-                    
-                    # เพิ่มส่วนสุดท้าย (ถ้ามี)
-                    if current_section:
-                        sections.append('\n'.join(current_section))
-                    
-                    # ค้นหาใน sections
-                    for section in sections:
-                        if not section.strip():
                             continue
                             
-                        # 1. ค้นหาทั้ง section
-                        similarity = similar(question, section)
+                        similarity = similar(question, para)
                         if similarity > best_match_score and similarity > 0.6:
-                            best_match = question
+                            found_answer = True
+                            best_match = para
                             best_match_score = similarity
-                            best_match_answer = section
-                            logger.info(f"พบ section ที่คล้ายใน TXT ({similarity:.2f}) จาก {txt_file}")
-                            
-                        # 2. ค้นหาคำสำคัญใน section
-                        elif question.lower() in section.lower():
-                            # คำนวณความคล้ายคลึงสำหรับคำสำคัญ
-                            similarity_keyword = 0.5 + (0.3 * (len(question) / len(section)))
-                            if similarity_keyword > best_match_score:
-                                best_match = question
-                                best_match_score = similarity_keyword
-                                best_match_answer = section
-                                logger.info(f"พบคำสำคัญใน TXT section ({similarity_keyword:.2f}) จาก {txt_file}")
-                        
-                        # 3. ตรวจสอบแบบรายบรรทัด
-                        lines = section.split('\n')
-                        for i, line in enumerate(lines):
-                            if not line.strip():
-                                continue
-                                
-                            line_similarity = similar(question, line)
-                            if line_similarity > best_match_score and line_similarity > 0.7:
-                                best_match = line
-                                best_match_score = line_similarity
-                                
-                                # ใช้บรรทัดที่พบ + บรรทัดถัดไป (ถ้ามี) เป็นคำตอบ
-                                context_lines = [line]
-                                for j in range(1, 4):  # ดึงข้อมูล 3 บรรทัดถัดไป (ถ้ามี)
-                                    if i+j < len(lines) and lines[i+j].strip():
-                                        context_lines.append(lines[i+j])
-                                
-                                best_match_answer = '\n'.join(context_lines)
-                                logger.info(f"พบบรรทัดที่คล้ายใน TXT ({line_similarity:.2f}) จาก {txt_file}")
+                            best_match_answer = paragraphs[i+1] if i+1 < len(paragraphs) else para
+                            logger.info(f"พบคำตอบจากไฟล์ TXT ({similarity:.2f}): {txt_file}")
+                            logger.info(f"ย่อหน้าที่คล้าย: {para[:100]}...")
+                            logger.info(f"ค่าความคล้าย: {similarity:.2f}")
                 except Exception as e:
                     logger.error(f"เกิดข้อผิดพลาดในการประมวลผลไฟล์ TXT {txt_file}: {str(e)}")
                     continue
         
         # ถ้าไม่พบคำตอบจากไฟล์ใด ๆ
-        if not best_match_answer:
-            return "ขออภัย ฉันไม่พบข้อมูลที่เกี่ยวข้องกับคำถามของคุณในเอกสารของเรา คุณสามารถถามคำถามเกี่ยวกับหัวข้ออื่นได้ค่ะ"
+        if not found_answer:
+            logger.info("ไม่พบคำตอบในเอกสาร")
+            return "ขออภัย ฉันไม่พบข้อมูลที่เกี่ยวข้องกับคำถามของคุณในเอกสารของเรา คุณสามารถถามคำถามเกี่ยวกับหัวข้ออื่นได้ค่ะ", False
         
-        # ปรับแต่งคำตอบให้อ่านง่าย
-        best_match_answer = best_match_answer.strip()
-        
-        # ถ้าเป็นคำตอบทั่วไปและคะแนนความคล้ายสูง
-        if best_match_score > 0.8:
-            return best_match_answer
-        
-        # สร้างคำตอบที่มีรูปแบบดีขึ้น
-        response = f"จากคำถาม '{question}' ของคุณ "
-        
-        # หากเป็นคำถามที่คล้ายกันมาก
-        if best_match_score > 0.7:
-            response += f"ฉันพบข้อมูลที่เกี่ยวข้องดังนี้:\n\n{best_match_answer}"
-        else:
-            response += f"ฉันพบข้อมูลที่อาจเกี่ยวข้องดังนี้:\n\n{best_match_answer}"
-            
-        return response
+        # ถ้าพบคำตอบ
+        logger.info(f"พบคำตอบในเอกสาร (ค่าความคล้าย: {best_match_score:.2f})")
+        return best_match_answer.strip(), True
             
     except Exception as e:
         logger.error(f"เกิดข้อผิดพลาดในการค้นหาเอกสาร: {str(e)}")
-        return "ขออภัย เกิดข้อผิดพลาดในการค้นหาข้อมูล กรุณาลองใหม่อีกครั้ง"
-
-
+        return "ขออภัย เกิดข้อผิดพลาดในการค้นหาข้อมูล กรุณาลองใหม่อีกครั้ง", False
 
 def ask_huggingface_model(question):
     """
@@ -631,15 +539,47 @@ def ask_huggingface_model(question):
     """
     try:
         if huggingface_qa_pipeline is None:
+            logger.warning("ไม่สามารถใช้งาน Hugging Face model ได้")
             return "ขออภัย ระบบไม่สามารถโหลดโมเดล AI ได้ กรุณาติดต่อผู้ดูแลระบบ"
         
-        logger.info(f"กำลังถามโมเดล Hugging Face: {question}")
-        result = huggingface_qa_pipeline(question, max_new_tokens=100)[0]['generated_text']
+        logger.info(f"กำลังถามโมเดล Hugging Face: '{question}'")
         
-        # ตัดข้อความให้สั้นลงเพื่อหลีกเลี่ยงปัญหาความยาวเกินขีดจำกัดของ LINE
-        if len(result) > 4997:
-            result = result[:4997] + "..."
-        return result
+        # สร้าง prompt ที่ชัดเจน
+        prompt = f"""โปรดตอบคำถามต่อไปนี้อย่างละเอียด:
+
+คำถาม: {question}
+
+คำตอบ: """
+        
+        # ปรับพารามิเตอร์ให้เหมาะสม
+        outputs = huggingface_qa_pipeline(
+            prompt,
+            max_new_tokens=200,
+            num_return_sequences=1,
+            no_repeat_ngram_size=3,
+            temperature=0.8,
+            top_k=50,
+            top_p=0.95,
+            do_sample=True
+        )
+        
+        # แยกคำตอบและทำความสะอาด
+        generated_text = outputs[0]['generated_text']
+        try:
+            answer = generated_text.split("คำตอบ:", 1)[1].strip()
+            # ลบคำซ้ำ
+            words = answer.split()
+            answer = " ".join(dict.fromkeys(words))
+        except:
+            answer = generated_text
+        
+        logger.info(f"ได้รับคำตอบจาก Hugging Face: {answer[:100]}...")
+        
+        if len(answer) < 10 or any(word in answer.lower() for word in ['error', 'ไม่สามารถ', 'ขออภัย']):
+            return "ขออภัย ฉันไม่สามารถตอบคำถามนี้ได้อย่างเหมาะสม กรุณาถามคำถามอื่น หรือถามในรูปแบบอื่น"
+            
+        return answer
+
     except Exception as e:
         logger.error(f"เกิดข้อผิดพลาดกับ Hugging Face: {str(e)}")
         return "ขออภัย ระบบกำลังมีปัญหาในการประมวลผล กรุณาลองใหม่ภายหลัง"
