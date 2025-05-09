@@ -1,2 +1,4 @@
 .env
 superai-xaew.json
+venv
+__pycache__/
