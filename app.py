@@ -185,17 +185,19 @@ def handle_message(event):
                 else:
                     # ขั้นตอนที่ 2: ค้นหาในเอกสาร
                     logger.info("เริ่มขั้นตอนที่ 2: ค้นหาในเอกสาร")
-                    reply_text, found_in_docs = search_from_documents(actual_message)
+                    reply_text, found_in_docs, rag_context = search_from_documents(actual_message)
 
-                    if not found_in_docs:
-                        # ขั้นตอนที่ 3: ใช้ Hugging Face
-                        logger.info("เริ่มขั้นตอนที่ 3: ใช้ Hugging Face")
+                    if found_in_docs and rag_context:
+                        logger.info("พบคำตอบจาก RAG")
+                        # ใช้คำตอบจาก RAG โดยตรง
+                        text_message = TextMessage(text=reply_text, quick_reply=quick_replies if quick_replies else None)
+                        send_multiple_messages(line_bot_api, event.reply_token, [text_message])
+                    else:
+                        # ใช้ Hugging Face เมื่อไม่พบในเอกสาร
+                        logger.info("ไม่พบคำตอบจาก RAG ใช้ Hugging Face แทน")
                         reply_text = ask_huggingface_model(actual_message, huggingface_qa_pipeline)
-                        logger.info("ได้คำตอบจาก Hugging Face")
-                    
-                    # ส่งข้อความที่ได้
-                    text_message = TextMessage(text=reply_text, quick_reply=quick_replies if quick_replies else None)
-                    send_multiple_messages(line_bot_api, event.reply_token, [text_message])
+                        text_message = TextMessage(text=reply_text, quick_reply=quick_replies if quick_replies else None)
+                        send_multiple_messages(line_bot_api, event.reply_token, [text_message])
                 
             except Exception as e:
                 logger.error(f"เกิดข้อผิดพลาดในการประมวลผลข้อความ: {str(e)}")

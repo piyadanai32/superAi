@@ -8,3 +8,6 @@ torch>=2.1.0
 sentencepiece>=0.1.99
 scikit-learn>=1.4.0
 python-docx>=0.8.11
+faiss-cpu>=1.7.4
+sentence-transformers>=2.2.2
+numpy>=1.24.0
