@@ -16,7 +16,6 @@ from google.protobuf.json_format import MessageToDict
 
 from retriever import search_from_documents
 from dialogflow import detect_intent_texts
-from huggingface import load_huggingface_pipeline, ask_huggingface_model
 from message import (
     process_payload, create_flex_message,
     send_multiple_messages, send_text_message
@@ -56,9 +55,6 @@ configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 api_client = ApiClient(configuration)
 line_bot_api = MessagingApi(api_client)
-
-# โหลด Hugging Face model
-huggingface_qa_pipeline = load_huggingface_pipeline()
 
 # คำตอบที่ไม่ต้องการจาก Dialogflow (หากได้คำตอบเหล่านี้จะถือว่า Dialogflow ไม่สามารถตอบคำถามได้)
 INVALID_DIALOGFLOW_RESPONSES = [
@@ -187,17 +183,9 @@ def handle_message(event):
                     logger.info("เริ่มขั้นตอนที่ 2: ค้นหาในเอกสาร")
                     reply_text, found_in_docs, rag_context = search_from_documents(actual_message)
 
-                    if found_in_docs and rag_context:
-                        logger.info("พบคำตอบจาก RAG")
-                        # ใช้คำตอบจาก RAG โดยตรง
-                        text_message = TextMessage(text=reply_text, quick_reply=quick_replies if quick_replies else None)
-                        send_multiple_messages(line_bot_api, event.reply_token, [text_message])
-                    else:
-                        # ใช้ Hugging Face เมื่อไม่พบในเอกสาร
-                        logger.info("ไม่พบคำตอบจาก RAG ใช้ Hugging Face แทน")
-                        reply_text = ask_huggingface_model(actual_message, huggingface_qa_pipeline)
-                        text_message = TextMessage(text=reply_text, quick_reply=quick_replies if quick_replies else None)
-                        send_multiple_messages(line_bot_api, event.reply_token, [text_message])
+                    # ส่งข้อความที่ได้
+                    text_message = TextMessage(text=reply_text, quick_reply=quick_replies if quick_replies else None)
+                    send_multiple_messages(line_bot_api, event.reply_token, [text_message])
                 
             except Exception as e:
                 logger.error(f"เกิดข้อผิดพลาดในการประมวลผลข้อความ: {str(e)}")
@@ -228,9 +216,6 @@ def status():
             "status": "✅ พร้อมใช้งาน" if os.path.exists(doc_path) else "❌ ไม่พบไฟล์",
             "path": doc_path,
             "exists": os.path.exists(doc_path)
-        },
-        "huggingface_model": {
-            "status": "✅ พร้อมใช้งาน" if huggingface_qa_pipeline is not None else "❌ ยังไม่ได้โหลด"
         },
         "line_api": {
             "status": "✅ ตั้งค่าแล้ว" if LINE_CHANNEL_ACCESS_TOKEN and LINE_CHANNEL_SECRET else "❌ ยังไม่ได้ตั้งค่า"

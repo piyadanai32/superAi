@@ -1,13 +1,10 @@
-Flask>=2.0.0
+flask==3.0.0
 python-dotenv>=0.20.0
 line-bot-sdk>=3.0.0
 google-cloud-dialogflow>=2.25.0
 protobuf>=3.20.0
-transformers>=4.36.2
-torch>=2.1.0
-sentencepiece>=0.1.99
-scikit-learn>=1.4.0
-python-docx>=0.8.11
 faiss-cpu>=1.7.4
 sentence-transformers>=2.2.2
 numpy>=1.24.0
+requests>=2.31.0
+tqdm>=4.66.1

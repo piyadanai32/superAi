@@ -2,6 +2,7 @@ import os
 import json
 import logging
 from rag import RAGSystem
+from ollama_client import generate_response
 
 logger = logging.getLogger(__name__)
 rag_system = None
@@ -11,13 +12,14 @@ def initialize_rag():
     try:
         rag_system = RAGSystem()
         base_dir = os.path.abspath(os.path.dirname(__file__))
-        json_path = os.path.join(base_dir, 'data', 'json', 'documents.json')
-        if os.path.exists(json_path):
-            success = rag_system.load_documents(json_path)
+        json_dir = os.path.join(base_dir, 'data', 'json')
+        
+        if os.path.exists(json_dir):
+            success = rag_system.load_documents(json_dir)  # ส่งโฟลเดอร์แทนไฟล์เดียว
             if success:
                 logger.info("RAG system initialized successfully")
                 return True
-        logger.error(f"Documents file not found at {json_path}")
+        logger.error(f"JSON directory not found at {json_dir}")
         return False
     except Exception as e:
         logger.error(f"Error initializing RAG system: {str(e)}")
@@ -34,28 +36,32 @@ def search_from_documents(question):
         logger.info(f"คำถาม: {question}")
         
         if not results:
-            return "ไม่พบข้อมูลที่เกี่ยวข้อง", False, None
+            return "ขออภัย ไม่พบข้อมูลที่เกี่ยวข้อง", False, None
 
         best_match = results[0]
         logger.info(f"คำตอบที่ดีที่สุด: {best_match['question']} (คะแนน: {best_match['score']:.4f})")
         
-        # ปรับเกณฑ์การตัดสินใจ
-        if best_match['score'] >= 0.5:  # ต้องมีความเหมือนอย่างน้อย 50%
+        if best_match['score'] >= 0.3:
             contexts = []
             for result in results:
-                if result['score'] >= 0.3:  # เก็บ context ที่มีความเหมือนอย่างน้อย 30%
+                if result['score'] >= 0.2:
                     contexts.append(f"Q: {result['question']}\nA: {result['answer']}")
             
             if contexts:
-                confidence = f" (ความมั่นใจ: {best_match['score']:.0%})"
-                return best_match['answer'] + confidence, True, {
+                combined_context = "\n\n".join(contexts)
+                try:
+                    answer = generate_response(question, combined_context)
+                except:
+                    # ถ้า Ollama ไม่พร้อม ใช้คำตอบจาก RAG โดยตรง
+                    answer = best_match['answer']
+                return answer, True, {
                     'question': question,
                     'contexts': contexts,
-                    'combined_context': "\n\n".join(contexts),
+                    'combined_context': combined_context,
                     'top_score': best_match['score']
                 }
 
-        return "ไม่พบข้อมูลที่ตรงกับคำถามเพียงพอ", False, None
+        return "ขออภัย ไม่พบข้อมูลที่ตรงกับคำถามของคุณ", False, None
 
     except Exception as e:
         logger.error(f"เกิดข้อผิดพลาดในการค้นหา: {str(e)}")
